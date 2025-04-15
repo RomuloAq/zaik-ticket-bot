@@ -1,11 +1,15 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputFile
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, filters,
                           ConversationHandler, CallbackQueryHandler, ContextTypes)
 import os
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
+from pdf2image import convert_from_bytes
 
 # Estados del formulario
 (FECHA, CLIENTE_INFO, PRODUCTO, CANTIDAD_PAGADA, FOTOS, CONFIRMACION) = range(6)
@@ -99,29 +103,35 @@ async def fotos_finalizadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     data = user_data[chat_id]
 
-    # Crear imagen base
-    img = Image.new('RGB', (1240, 1754), color=(255, 255, 255))  # A4 vertical
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    # Crear PDF
+    nombre = data['cliente']['nombre'].replace(" ", "")
+    fecha = data['fecha'].replace(" ", "")
+    filename = f"ticket_{nombre}_{fecha}.pdf"
+    pdf_path = f"/tmp/{filename}"
 
-    y = 20
-    draw.text((50, y), f"Zaik Store - Ticket de compra", font=font, fill=(0, 0, 0))
-    y += 30
-    draw.text((50, y), f"Fecha: {data['fecha']}", font=font, fill=(0, 0, 0))
-    y += 40
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    width, height = A4
+    y = height - 50
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, y, "Zaik Store - Ticket de compra")
+    y -= 30
+    c.setFont("Helvetica", 10)
+    c.drawString(50, y, f"Fecha: {data['fecha']}")
+    y -= 20
 
     cli = data['cliente']
-    draw.text((50, y), f"Cliente: {cli['nombre']}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Correo: {cli['correo']}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Dirección: {cli['direccion']}, {cli['colonia']}, {cli['ciudad']}, {cli['estado']}, {cli['pais']}", font=font, fill=(0, 0, 0))
-    y += 40
+    c.drawString(50, y, f"Cliente: {cli['nombre']}")
+    y -= 15
+    c.drawString(50, y, f"Correo: {cli['correo']} | Número: {cli['numero']}")
+    y -= 15
+    c.drawString(50, y, f"Dirección: {cli['direccion']}, {cli['colonia']}, {cli['ciudad']}, {cli['estado']}, {cli['pais']}")
+    y -= 30
 
     subtotal = 0
     for prod in data['productos']:
-        draw.text((50, y), f"{prod['descripcion']} - Talla: {prod['talla']} - {prod['cantidad']} x ${prod['costo']} - Desc: ${prod['descuento']} = ${prod['total']:.2f}", font=font, fill=(0, 0, 0))
-        y += 20
+        c.drawString(50, y, f"{prod['descripcion']} | Talla: {prod['talla']} | Cantidad: {prod['cantidad']} | Costo: ${prod['costo']} | Desc: ${prod['descuento']} | Total: ${prod['total']:.2f}")
+        y -= 15
         subtotal += prod['total']
 
     descuento_total = sum(p['descuento'] * p['cantidad'] for p in data['productos'])
@@ -129,38 +139,49 @@ async def fotos_finalizadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pagado = data['cantidad_pagada']
     restante = total - pagado
 
-    y += 30
-    draw.text((50, y), f"Subtotal: ${subtotal:.2f}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Descuento total: ${descuento_total:.2f}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Total: ${total:.2f}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Pagado: ${pagado:.2f}", font=font, fill=(0, 0, 0))
-    y += 20
-    draw.text((50, y), f"Saldo restante: ${restante:.2f}", font=font, fill=(255, 0, 0))
-    y += 40
+    y -= 20
+    c.drawString(50, y, f"Subtotal: ${subtotal:.2f}")
+    y -= 15
+    c.drawString(50, y, f"Descuento total: ${descuento_total:.2f}")
+    y -= 15
+    c.drawString(50, y, f"Total: ${total:.2f}")
+    y -= 15
+    c.drawString(50, y, f"Pagado: ${pagado:.2f}")
+    y -= 15
+    c.drawString(50, y, f"Saldo restante: ${restante:.2f}")
+    y -= 30
 
-    fotos = data['fotos']
-    if fotos:
-        col = 0
-        for i, file_id in enumerate(fotos):
-            file = await context.bot.get_file(file_id)
-            f = await file.download_as_bytearray()
-            with Image.open(io.BytesIO(f)) as photo:
-                photo = photo.convert('RGB')
-                photo.thumbnail((250, 250))
-                img.paste(photo, (50 + col * 290, y))
-                col += 1
-                if col >= 4:
-                    col = 0
-                    y += 270
+    # Fotos (4 por fila)
+    col = 0
+    img_y = y
+    for i, file_id in enumerate(data['fotos']):
+        file = await context.bot.get_file(file_id)
+        f = await file.download_as_bytearray()
+        image = Image.open(io.BytesIO(f)).convert('RGB')
+        image.thumbnail((120, 120))
+        img_io = io.BytesIO()
+        image.save(img_io, format='PNG')
+        img_io.seek(0)
+        c.drawImage(ImageReader(img_io), 50 + col * 130, img_y, width=120, height=120)
+        col += 1
+        if col == 4:
+            col = 0
+            img_y -= 130
 
-    # Convertir imagen a bytes y enviar
-    with io.BytesIO() as output:
-        img.save(output, format="PNG")
-        output.seek(0)
-        await update.message.reply_photo(photo=output, caption="Aquí está tu ticket en imagen 🧾")
+    c.save()
+
+    # Convertir PDF a imagen para preview
+    with open(pdf_path, 'rb') as f:
+        images = convert_from_bytes(f.read())
+    img_io = io.BytesIO()
+    images[0].save(img_io, format='PNG')
+    img_io.seek(0)
+
+    await update.message.reply_photo(photo=img_io, caption="🧾 Aquí está tu ticket generado.")
+
+    # Enviar PDF
+    with open(pdf_path, 'rb') as pdf_file:
+        await update.message.reply_document(document=InputFile(pdf_file, filename=filename), caption="📥 Descarga tu ticket en PDF")
 
     return ConversationHandler.END
 
