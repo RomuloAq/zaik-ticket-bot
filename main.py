@@ -2,9 +2,10 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, filters,
                           ConversationHandler, CallbackQueryHandler, ContextTypes)
-
 import os
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # Estados del formulario
 (FECHA, CLIENTE_INFO, PRODUCTO, CANTIDAD_PAGADA, FOTOS, CONFIRMACION) = range(6)
@@ -95,8 +96,72 @@ async def recibir_fotos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return FOTOS
 
 async def fotos_finalizadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Gracias 🙌 Estamos generando el resumen visual del ticket. 🧾")
-    # Aquí irá la FASE 2: generación de imagen (pendiente)
+    chat_id = update.effective_chat.id
+    data = user_data[chat_id]
+
+    # Crear imagen base
+    img = Image.new('RGB', (1240, 1754), color=(255, 255, 255))  # A4 vertical
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    y = 20
+    draw.text((50, y), f"Zaik Store - Ticket de compra", font=font, fill=(0, 0, 0))
+    y += 30
+    draw.text((50, y), f"Fecha: {data['fecha']}", font=font, fill=(0, 0, 0))
+    y += 40
+
+    cli = data['cliente']
+    draw.text((50, y), f"Cliente: {cli['nombre']}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Correo: {cli['correo']}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Dirección: {cli['direccion']}, {cli['colonia']}, {cli['ciudad']}, {cli['estado']}, {cli['pais']}", font=font, fill=(0, 0, 0))
+    y += 40
+
+    subtotal = 0
+    for prod in data['productos']:
+        draw.text((50, y), f"{prod['descripcion']} - Talla: {prod['talla']} - {prod['cantidad']} x ${prod['costo']} - Desc: ${prod['descuento']} = ${prod['total']:.2f}", font=font, fill=(0, 0, 0))
+        y += 20
+        subtotal += prod['total']
+
+    descuento_total = sum(p['descuento'] * p['cantidad'] for p in data['productos'])
+    total = subtotal
+    pagado = data['cantidad_pagada']
+    restante = total - pagado
+
+    y += 30
+    draw.text((50, y), f"Subtotal: ${subtotal:.2f}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Descuento total: ${descuento_total:.2f}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Total: ${total:.2f}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Pagado: ${pagado:.2f}", font=font, fill=(0, 0, 0))
+    y += 20
+    draw.text((50, y), f"Saldo restante: ${restante:.2f}", font=font, fill=(255, 0, 0))
+    y += 40
+
+    fotos = data['fotos']
+    if fotos:
+        col = 0
+        for i, file_id in enumerate(fotos):
+            file = await context.bot.get_file(file_id)
+            f = await file.download_as_bytearray()
+            with Image.open(io.BytesIO(f)) as photo:
+                photo = photo.convert('RGB')
+                photo.thumbnail((250, 250))
+                img.paste(photo, (50 + col * 290, y))
+                col += 1
+                if col >= 4:
+                    col = 0
+                    y += 270
+
+    # Convertir imagen a bytes y enviar
+    with io.BytesIO() as output:
+        img.save(output, format="PNG")
+        output.seek(0)
+        await update.message.reply_photo(photo=output, caption="Aquí está tu ticket en imagen 🧾")
+
     return ConversationHandler.END
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
